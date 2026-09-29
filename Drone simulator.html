@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quadcopter Drone Simulator</title>
+<style>
+  /* ===== Page & HUD styling ===== */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9cc4e4; font-family: "Trebuchet MS", "Segoe UI", sans-serif; color: #fff; }
+  canvas { display: block; }
+  .panel { position: fixed; background: rgba(12, 22, 34, .62); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,.18); border-radius: 10px; padding: 12px 16px; font-size: 14px; line-height: 1.55; }
+  #telemetry { top: 14px; left: 14px; min-width: 210px; }
+  #telemetry b { display: inline-block; width: 74px; color: #8fd0ff; font-weight: 600; }
+  #telemetry .val { font-variant-numeric: tabular-nums; }
+  #controls { top: 14px; right: 14px; }
+  #controls kbd { background: #fff; color: #10202e; border-radius: 4px; padding: 1px 6px; font-size: 12px; font-weight: 700; margin-right: 6px; }
+  #controls div { margin: 2px 0; }
+  #speedbox { bottom: 18px; left: 50%; transform: translateX(-50%); width: 300px; text-align: center; }
+  #speedbar { height: 8px; background: rgba(255,255,255,.2); border-radius: 4px; margin-top: 6px; overflow: hidden; }
+  #speedfill { height: 100%; width: 0; background: linear-gradient(90deg, #4be3a1, #f2d64b, #ff6b4a); }
+  #speedtxt { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #status { font-size: 12px; color: #ffd66b; min-height: 16px; }
+  #fps { bottom: 18px; right: 14px; padding: 6px 12px; font-variant-numeric: tabular-nums; }
+  #hint { bottom: 18px; left: 14px; font-size: 12px; width: 210px; }
+  #hint label { display: flex; justify-content: space-between; margin-top: 4px; }
+  #hint input[type=range] { width: 100%; accent-color: #4bb3ff; margin: 2px 0 6px; }
+</style>
+</head>
+<body>
+
+<div id="telemetry" class="panel">
+  <div><b>X</b><span class="val" id="px">0.0</span> m</div>
+  <div><b>Y</b><span class="val" id="py">0.0</span> m</div>
+  <div><b>Z</b><span class="val" id="pz">0.0</span> m</div>
+  <div><b>Altitude</b><span class="val" id="alt">0.0</span> m</div>
+  <div><b>Yaw</b><span class="val" id="yawv">0</span>°</div>
+</div>
+
+<div id="controls" class="panel">
+  <div><kbd>W</kbd>Forward</div>
+  <div><kbd>S</kbd>Backward</div>
+  <div><kbd>A</kbd>Left</div>
+  <div><kbd>D</kbd>Right</div>
+  <div><kbd>↓</kbd>Move up</div>
+  <div><kbd>↑</kbd>Move down</div>
+  <div><kbd>Q</kbd>Yaw left (CCW)</div>
+  <div><kbd>E</kbd>Yaw right (CW)</div>
+  <div><kbd>Space</kbd>Hover</div>
+  <div><kbd>R</kbd>Reset</div>
+  <div><kbd>M</kbd>Mute sound</div>
+  <div><kbd>Mouse drag</kbd>Orbit camera</div>
+  <div><kbd>Wheel</kbd>Zoom</div>
+</div>
+
+<div id="speedbox" class="panel">
+  <span id="speedtxt">0.0</span> m/s <span style="opacity:.7">(<span id="kmh">0</span> km/h)</span>
+  <div id="speedbar"><div id="speedfill"></div></div>
+  <div id="status"></div>
+</div>
+
+<div id="fps" class="panel">-- FPS</div>
+<div id="hint" class="panel">
+  <label><span>Move speed</span><span id="spdv">14 m/s</span></label>
+  <input type="range" id="spdIn" min="5" max="30" step="1" value="14">
+  <label><span>Yaw speed</span><span id="yawsv">90 °/s</span></label>
+  <input type="range" id="yawIn" min="20" max="240" step="5" value="90">
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* =====================================================================
+   1. SETUP: renderer, scene, camera
+   ===================================================================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xbfd9ee, 120, 520);
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 2000);
+
+/* =====================================================================
+   2. SKY (gradient dome) & LIGHTING
+   ===================================================================== */
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(1000, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(0x2f78c4) }, bottom: { value: new THREE.Color(0xd8ecf8) } },
+    vertexShader: `varying float h; void main(){ h = normalize(position).y; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: `uniform vec3 top; uniform vec3 bottom; varying float h;
+      void main(){ gl_FragColor = vec4(mix(bottom, top, pow(clamp(h,0.0,1.0), 0.6)), 1.0); }`
+  })
+);
+scene.add(sky);
+
+scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x5b7a3a, 0.75));
+const sun = new THREE.DirectionalLight(0xfff2d6, 1.1);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 1, far: 250 });
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
+const SUN_OFFSET = new THREE.Vector3(60, 90, 40);
+
+/* =====================================================================
+   3. TERRAIN: large procedurally textured ground
+   ===================================================================== */
+function makeGrassTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#4f8a3c'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 3500; i++) {
+    const l = 30 + Math.random() * 25;
+    g.fillStyle = `hsl(${90 + Math.random() * 30},45%,${l}%)`;
+    g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(160, 160);
+  t.anisotropy = 8;
+  return t;
+}
+const WORLD = 800; // terrain size
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(WORLD, WORLD), new THREE.MeshStandardMaterial({ map: makeGrassTexture(), roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Launch pad
+const pad = new THREE.Mesh(new THREE.CylinderGeometry(4, 4, 0.1, 40), new THREE.MeshStandardMaterial({ color: 0x555b63, roughness: .8 }));
+pad.position.y = 0.05; pad.receiveShadow = true; scene.add(pad);
+const padH = new THREE.Mesh(new THREE.RingGeometry(1.4, 1.8, 40), new THREE.MeshBasicMaterial({ color: 0xffd23f, side: THREE.DoubleSide }));
+padH.rotation.x = -Math.PI / 2; padH.position.y = 0.11; scene.add(padH);
+
+/* =====================================================================
+   4. ENVIRONMENT: buildings, trees, obstacles (+ collider list)
+   ===================================================================== */
+const colliders = []; // {type:'box'|'cyl', ...}
+function rand(a, b) { return a + Math.random() * (b - a); }
+// Seeded-ish layout so the world stays the same each load
+let seed = 7; Math.random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+function makeWindowTexture(color) {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = color; g.fillRect(0, 0, 128, 256);
+  for (let y = 12; y < 250; y += 28) for (let x = 10; x < 120; x += 28) {
+    g.fillStyle = Math.random() > .3 ? '#8fb8d8' : '#f5e6a3';
+    g.fillRect(x, y, 16, 16);
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+const farFromSpawn = (x, z, r) => Math.hypot(x, z) > r;
+
+// Buildings
+const bColors = ['#b9b2a6', '#9aa5b1', '#c4a484', '#a8b5a0', '#8b8f9a'];
+for (let i = 0; i < 28; i++) {
+  const x = rand(-320, 320), z = rand(-320, 320);
+  if (!farFromSpawn(x, z, 30)) continue;
+  const w = rand(8, 22), d = rand(8, 22), h = rand(10, 55);
+  const tex = makeWindowTexture(bColors[i % bColors.length]);
+  tex.repeat.set(Math.round(w / 7), Math.round(h / 9));
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ map: tex, roughness: .85 }));
+  m.position.set(x, h / 2, z); m.castShadow = m.receiveShadow = true; scene.add(m);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(w * 1.02, .6, d * 1.02), new THREE.MeshStandardMaterial({ color: 0x40444a }));
+  roof.position.set(x, h + .3, z); roof.castShadow = true; scene.add(roof);
+  colliders.push({ type: 'box', min: new THREE.Vector3(x - w / 2, 0, z - d / 2), max: new THREE.Vector3(x + w / 2, h + .6, z + d / 2) });
+}
+
+// Trees (trunk + layered canopy). Each gets two cylinder colliders.
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2b, roughness: 1 });
+const leafMats = [0x2f6b2f, 0x3b7d34, 0x2a5e3a].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: .9 }));
+for (let i = 0; i < 260; i++) {
+  const x = rand(-380, 380), z = rand(-380, 380);
+  if (!farFromSpawn(x, z, 14)) continue;
+  const s = rand(.8, 1.6), tree = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(.35 * s, .5 * s, 3.5 * s, 8), trunkMat);
+  trunk.position.y = 1.75 * s; trunk.castShadow = true; tree.add(trunk);
+  const lm = leafMats[i % 3];
+  for (let k = 0; k < 3; k++) {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry((2.4 - k * .6) * s, 3.2 * s, 9), lm);
+    cone.position.y = (3.6 + k * 2.1) * s; cone.castShadow = true; tree.add(cone);
+  }
+  tree.position.set(x, 0, z); scene.add(tree);
+  colliders.push({ type: 'cyl', x, z, r: .6 * s + .1, y0: 0, y1: 3.6 * s });
+  colliders.push({ type: 'cyl', x, z, r: 2.0 * s, y0: 3.4 * s, y1: 10.5 * s });
+}
+
+// Obstacles: pillars, crates, and a ring gate to fly through
+const pillarMat = new THREE.MeshStandardMaterial({ color: 0xd9534f, roughness: .6 });
+for (let i = 0; i < 14; i++) {
+  const x = rand(-70, 70), z = rand(-70, 70);
+  if (!farFromSpawn(x, z, 12)) continue;
+  const h = rand(4, 14), r = rand(.6, 1.2);
+  const p = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 16), pillarMat);
+  p.position.set(x, h / 2, z); p.castShadow = p.receiveShadow = true; scene.add(p);
+  colliders.push({ type: 'cyl', x, z, r, y0: 0, y1: h });
+}
+const crateMat = new THREE.MeshStandardMaterial({ color: 0xb98a4e, roughness: .9 });
+for (let i = 0; i < 12; i++) {
+  const x = rand(-60, 60), z = rand(-60, 60), s = rand(1.5, 4);
+  if (!farFromSpawn(x, z, 10)) continue;
+  const c = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), crateMat);
+  c.position.set(x, s / 2, z); c.castShadow = c.receiveShadow = true; scene.add(c);
+  colliders.push({ type: 'box', min: new THREE.Vector3(x - s / 2, 0, z - s / 2), max: new THREE.Vector3(x + s / 2, s, z + s / 2) });
+}
+// Ring gate (decorative, fly through the middle) — two posts collide
+const gate = new THREE.Mesh(new THREE.TorusGeometry(4, .35, 12, 40), new THREE.MeshStandardMaterial({ color: 0xff9f1c, emissive: 0x552800 }));
+gate.position.set(0, 8, -35); gate.castShadow = true; scene.add(gate);
+
+/* =====================================================================
+   5. DRONE MODEL (quadcopter)
+   ===================================================================== */
+const drone = new THREE.Group();   // position + yaw
+const tiltGroup = new THREE.Group(); // pitch + roll
+drone.add(tiltGroup); scene.add(drone);
+
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x1d2229, metalness: .5, roughness: .4 });
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe8ecf0, metalness: .3, roughness: .35 });
+const propMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: .5 });
+
+const body = new THREE.Mesh(new THREE.BoxGeometry(.7, .18, 1.0), bodyMat); body.castShadow = true; tiltGroup.add(body);
+const topPlate = new THREE.Mesh(new THREE.BoxGeometry(.5, .1, .6), darkMat); topPlate.position.y = .13; topPlate.castShadow = true; tiltGroup.add(topPlate);
+const gimbal = new THREE.Mesh(new THREE.SphereGeometry(.14, 16, 12), darkMat); gimbal.position.set(0, -.14, -.42); gimbal.castShadow = true; tiltGroup.add(gimbal);
+const lens = new THREE.Mesh(new THREE.SphereGeometry(.06, 12, 8), new THREE.MeshStandardMaterial({ color: 0x3355ff, emissive: 0x112266 }));
+lens.position.set(0, -.14, -.54); tiltGroup.add(lens);
+
+const propellers = [];
+[[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz], i) => {
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, .07, .09), darkMat);
+  arm.position.set(sx * .5, 0, sz * .5); arm.rotation.y = -Math.atan2(sz, sx) + (sx * sz > 0 ? 0 : 0);
+  arm.rotation.y = Math.atan2(-sz, sx); arm.castShadow = true; tiltGroup.add(arm);
+  const motor = new THREE.Mesh(new THREE.CylinderGeometry(.12, .12, .16, 16), darkMat);
+  motor.position.set(sx * .95 * .707 * 1.0, .04, sz * .95 * .707 * 1.0); motor.castShadow = true; tiltGroup.add(motor);
+  const pg = new THREE.Group(); pg.position.set(motor.position.x, .16, motor.position.z);
+  for (let b = 0; b < 2; b++) {
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(.85, .015, .09), propMat);
+    blade.rotation.y = b * Math.PI / 2 + .3; blade.castShadow = true; pg.add(blade);
+  }
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(.44, 24), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: .1, side: THREE.DoubleSide, depthWrite: false }));
+  disc.rotation.x = -Math.PI / 2; disc.position.y = .01; pg.add(disc);
+  tiltGroup.add(pg);
+  propellers.push({ g: pg, dir: i % 2 ? 1 : -1 });
+  const led = new THREE.Mesh(new THREE.SphereGeometry(.05, 8, 6), new THREE.MeshBasicMaterial({ color: sz < 0 ? 0x33ff77 : 0xff3344 }));
+  led.position.set(motor.position.x, -.02, motor.position.z); tiltGroup.add(led);
+  // landing leg
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(.05, .3, .05), darkMat);
+  leg.position.set(sx * .3, -.2, sz * .3); tiltGroup.add(leg);
+});
+// Skids
+[-1, 1].forEach(s => { const sk = new THREE.Mesh(new THREE.BoxGeometry(.05, .04, 1.0), darkMat); sk.position.set(s * .3, -.36, 0); sk.castShadow = true; tiltGroup.add(sk); });
+
+/* =====================================================================
+   6. INPUT: keyboard + mouse
+   ===================================================================== */
+const keys = {};
+let hover = false, muted = false;
+const START = new THREE.Vector3(0, 0.4, 0);
+addEventListener('keydown', e => {
+  initAudio();
+  if (['ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if (e.code === 'Space') hover = true;
+  if (e.code === 'KeyR') resetDrone();
+  if (e.code === 'KeyM') { muted = !muted; if (audio) audio.master.gain.value = muted ? 0 : .12; }
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Camera orbit state. camOffset is the mouse orbit angle RELATIVE to the drone's heading,
+// so the camera always sits behind the drone unless the user orbits it (it re-centres after a pause).
+let camOffset = 0, camPitch = 0.35, camDist = 6;
+let camYawS = 0, camPitchS = 0.35, camDistS = 6; // smoothed values
+let dragging = false, lastDrag = 0;
+addEventListener('mousedown', e => { initAudio(); if (!e.target.closest('.panel')) dragging = true; });
+addEventListener('mouseup', () => dragging = false);
+addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camOffset -= e.movementX * 0.005;
+  camPitch = THREE.MathUtils.clamp(camPitch + e.movementY * 0.005, -0.15, 1.3);
+  lastDrag = performance.now();
+});
+addEventListener('wheel', e => { camDist = THREE.MathUtils.clamp(camDist + e.deltaY * 0.005, 3, 18); }, { passive: true });
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// Adjustable speed / yaw-speed sliders
+const $ = id => document.getElementById(id);
+$('spdIn').addEventListener('input', e => { MAX_H = +e.target.value; MAX_V = MAX_H * 0.5; $('spdv').textContent = MAX_H + ' m/s'; });
+$('yawIn').addEventListener('input', e => { YAW_SPEED = +e.target.value * Math.PI / 180; $('yawsv').textContent = e.target.value + ' °/s'; });
+['spdIn', 'yawIn'].forEach(id => $(id).addEventListener('change', e => e.target.blur())); // keep keys for flying
+
+/* =====================================================================
+   7. SOUND: procedural rotor hum via Web Audio
+   ===================================================================== */
+let audio = null;
+function initAudio() {
+  if (audio) { if (audio.ctx.state === 'suspended') audio.ctx.resume(); return; }
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctx.createGain(); master.gain.value = muted ? 0 : .12;
+    const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 900;
+    const oscs = [0, 1, 2].map(i => { const o = ctx.createOscillator(); o.type = i ? 'sawtooth' : 'square'; o.detune.value = i * 14; o.start(); o.connect(filter); return o; });
+    // buzz modulation for rotor flutter
+    const lfo = ctx.createOscillator(), lfoG = ctx.createGain(); lfo.frequency.value = 38; lfoG.gain.value = .04; lfo.connect(lfoG); lfoG.connect(master.gain); lfo.start();
+    filter.connect(master); master.connect(ctx.destination);
+    audio = { ctx, master, oscs, filter };
+  } catch (err) { console.warn('Audio unavailable', err); }
+}
+function updateAudio(speed, vy) {
+  if (!audio) return;
+  const f = 110 + speed * 5 + Math.max(vy, 0) * 8;
+  audio.oscs.forEach((o, i) => o.frequency.setTargetAtTime(f * (1 + i * .01), audio.ctx.currentTime, .1));
+  audio.filter.frequency.setTargetAtTime(700 + speed * 60, audio.ctx.currentTime, .1);
+}
+
+/* =====================================================================
+   8. PHYSICS: acceleration, drag, ground & obstacle collision
+   ===================================================================== */
+let MAX_H = 14, MAX_V = 7;        // max horizontal / vertical speed (m/s) - adjustable via slider
+let YAW_SPEED = 90 * Math.PI / 180; // max yaw rate (rad/s) - adjustable via slider
+let yawVel = 0;                    // current smoothed yaw rate
+const ACCEL = 22, BRAKE = 10, HOVER_BRAKE = 30;
+const RADIUS = 0.75, MIN_Y = 0.4;
+const vel = new THREE.Vector3();
+let droneYaw = 0, pitchS = 0, rollS = 0;
+let status = '';
+
+function resetDrone() {
+  drone.position.copy(START); vel.set(0, 0, 0);
+  camOffset = 0; camYawS = 0; droneYaw = 0; yawVel = 0; pitchS = rollS = 0; hover = false;
+}
+
+// Push the drone out of any collider it overlaps (sphere vs box / cylinder)
+function resolveCollisions(p) {
+  let hit = false;
+  for (const c of colliders) {
+    if (c.type === 'box') {
+      const cx = THREE.MathUtils.clamp(p.x, c.min.x, c.max.x);
+      const cy = THREE.MathUtils.clamp(p.y, c.min.y, c.max.y);
+      const cz = THREE.MathUtils.clamp(p.z, c.min.z, c.max.z);
+      let dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < RADIUS) {
+        let n;
+        if (d > 1e-6) n = new THREE.Vector3(dx, dy, dz).divideScalar(d);
+        else { n = new THREE.Vector3(0, 1, 0); } // inside box: push up
+        p.addScaledVector(n, RADIUS - d);
+        const vn = vel.dot(n); if (vn < 0) vel.addScaledVector(n, -vn * 1.2); // cancel & slight bounce
+        hit = true;
+      }
+    } else { // vertical cylinder
+      if (p.y < c.y0 - RADIUS || p.y > c.y1 + RADIUS) continue;
+      const dx = p.x - c.x, dz = p.z - c.z, d = Math.hypot(dx, dz), min = c.r + RADIUS;
+      if (d < min) {
+        if (p.y > c.y1) { p.y = c.y1 + RADIUS; if (vel.y < 0) vel.y = 0; hit = true; continue; }
+        const nx = d > 1e-6 ? dx / d : 1, nz = d > 1e-6 ? dz / d : 0;
+        p.x = c.x + nx * min; p.z = c.z + nz * min;
+        const vn = vel.x * nx + vel.z * nz;
+        if (vn < 0) { vel.x -= nx * vn * 1.2; vel.z -= nz * vn * 1.2; }
+        hit = true;
+      }
+    }
+  }
+  return hit;
+}
+
+function updatePhysics(dt) {
+  // --- Yaw control: Q = counter-clockwise, E = clockwise, with smooth rate changes
+  const inY = (keys.KeyQ ? 1 : 0) - (keys.KeyE ? 1 : 0);
+  yawVel += (inY * YAW_SPEED - yawVel) * Math.min(1, dt * 6);
+  droneYaw += yawVel * dt;
+  drone.rotation.y = droneYaw;
+
+  // --- Heading-relative axes: "forward" is the direction the drone is facing
+  const fwd = new THREE.Vector3(-Math.sin(droneYaw), 0, -Math.cos(droneYaw));
+  const right = new THREE.Vector3(Math.cos(droneYaw), 0, -Math.sin(droneYaw));
+
+  const inF = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+  const inR = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  const inU = (keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0); // Down Arrow = up, Up Arrow = down
+  const moving = inF || inR || inU;
+  if (moving) hover = false;
+
+  // Desired velocity from input
+  const target = new THREE.Vector3()
+    .addScaledVector(fwd, inF).addScaledVector(right, inR);
+  if (target.lengthSq() > 0) target.normalize().multiplyScalar(MAX_H);
+  target.y = inU * MAX_V;
+
+  // Smooth acceleration toward target; stronger braking when no input / hovering
+  const rate = hover ? HOVER_BRAKE : (moving ? ACCEL : BRAKE);
+  const diff = target.clone().sub(vel);
+  const step = rate * dt;
+  if (diff.length() <= step) vel.copy(target); else vel.addScaledVector(diff.normalize(), step);
+
+  // Integrate position with delta time
+  const p = drone.position;
+  p.addScaledVector(vel, dt);
+
+  // World bounds and ground
+  const B = WORLD / 2 - 5;
+  p.x = THREE.MathUtils.clamp(p.x, -B, B); p.z = THREE.MathUtils.clamp(p.z, -B, B);
+  p.y = Math.min(p.y, 250);
+  status = hover ? 'HOVER' : '';
+  if (resolveCollisions(p)) status = 'COLLISION';
+  if (p.y < MIN_Y) { p.y = MIN_Y; if (vel.y < 0) vel.y = 0; }
+
+  // Visual attitude: tilt follows velocity in the drone's own frame
+
+  const vf = vel.dot(new THREE.Vector3(-Math.sin(droneYaw), 0, -Math.cos(droneYaw)));
+  const vr = vel.dot(new THREE.Vector3(Math.cos(droneYaw), 0, -Math.sin(droneYaw)));
+  const airborne = p.y > MIN_Y + 0.05;
+  const k = airborne ? 1 : 0.2;
+  const pitchT = -THREE.MathUtils.clamp(vf / MAX_H, -1, 1) * 0.38 * k;  // nose down forward, up backward
+  const rollT = (-THREE.MathUtils.clamp(vr / MAX_H, -1, 1) * 0.38 + (yawVel / Math.max(YAW_SPEED, 0.3)) * 0.12) * k; // bank into strafe + slight bank into turns
+  const s = Math.min(1, dt * 5);                                        // smooth return to level
+  pitchS += (pitchT - pitchS) * s; rollS += (rollT - rollS) * s;
+  tiltGroup.rotation.set(pitchS, 0, rollS);
+  // gentle hover bob
+  tiltGroup.position.y = airborne ? Math.sin(performance.now() / 400) * 0.02 : 0;
+}
+
+/* =====================================================================
+   9. PROPELLERS
+   ===================================================================== */
+let spin = 0;
+function updateProps(dt) {
+  const load = 1 + vel.length() / 12;
+  spin += dt * 60 * load;
+  propellers.forEach(p => p.g.rotation.y = spin * p.dir);
+}
+
+/* =====================================================================
+   10. FOLLOW CAMERA (smooth third-person)
+   ===================================================================== */
+function updateCamera(dt) {
+  const k = 1 - Math.exp(-dt * 6);
+  // Re-centre the orbit offset shortly after the user stops dragging
+  if (!dragging && performance.now() - lastDrag > 2000) camOffset *= Math.exp(-dt * 1.5);
+  // Camera azimuth chases (drone heading + orbit offset) along the shortest angular path
+  let d = droneYaw + camOffset - camYawS; d = Math.atan2(Math.sin(d), Math.cos(d));
+  camYawS += d * k;
+  camPitchS += (camPitch - camPitchS) * k;
+  camDistS += (camDist - camDistS) * k;
+  const dp = drone.position;
+  const offset = new THREE.Vector3(
+    Math.sin(camYawS) * Math.cos(camPitchS),
+    Math.sin(camPitchS),
+    Math.cos(camYawS) * Math.cos(camPitchS)
+  ).multiplyScalar(camDistS);
+  const desired = dp.clone().add(offset);
+  desired.y = Math.max(desired.y, 0.5); // keep camera above ground
+  camera.position.lerp(desired, 1 - Math.exp(-dt * 8));
+  camera.lookAt(dp.x, dp.y + 0.6, dp.z);
+}
+
+/* =====================================================================
+   11. HUD & FPS
+   ===================================================================== */
+let frames = 0, fpsT = 0;
+function updateHUD(dt) {
+  const p = drone.position, sp = vel.length();
+  $('px').textContent = p.x.toFixed(1); $('py').textContent = p.y.toFixed(1); $('pz').textContent = p.z.toFixed(1);
+  $('alt').textContent = Math.max(0, p.y - MIN_Y).toFixed(1);
+  $('yawv').textContent = (((-droneYaw * 180 / Math.PI) % 360 + 360) % 360).toFixed(0);
+  $('speedtxt').textContent = sp.toFixed(1); $('kmh').textContent = (sp * 3.6).toFixed(0);
+  $('speedfill').style.width = Math.min(100, sp / MAX_H * 100) + '%';
+  $('status').textContent = status;
+  frames++; fpsT += dt;
+  if (fpsT >= 0.5) { $('fps').textContent = Math.round(frames / fpsT) + ' FPS'; frames = 0; fpsT = 0; }
+}
+
+/* =====================================================================
+   12. MAIN LOOP
+   ===================================================================== */
+resetDrone();
+camera.position.set(0, 3, 7);
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); // clamp to avoid huge steps
+  last = now;
+  updatePhysics(dt);
+  updateProps(dt);
+  updateCamera(dt);
+  updateAudio(vel.length(), vel.y);
+  // Shadow light follows the drone so shadows stay crisp everywhere
+  sun.target.position.copy(drone.position);
+  sun.position.copy(drone.position).add(SUN_OFFSET);
+  sky.position.copy(camera.position);
+  updateHUD(dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
